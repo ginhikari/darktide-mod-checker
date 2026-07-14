@@ -87,12 +87,23 @@ def download_file(url, dest_dir):
 
 def extract_archive(archive_path, extract_to):
     extract_to.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["7z", "x", "-y", f"-o{extract_to}", str(archive_path)],
-        capture_output=True, text=True,
-    )
+    if archive_path.suffix.lower() == ".rar" and shutil.which("unrar"):
+        # 7z's built-in RAR decoder doesn't support every compression
+        # method (RAR5 in particular) - the real unrar tool is far more
+        # reliable when available.
+        result = subprocess.run(
+            ["unrar", "x", "-y", str(archive_path), f"{extract_to}/"],
+            capture_output=True, text=True,
+        )
+        tool = "unrar"
+    else:
+        result = subprocess.run(
+            ["7z", "x", "-y", f"-o{extract_to}", str(archive_path)],
+            capture_output=True, text=True,
+        )
+        tool = "7z"
     if result.returncode != 0:
-        raise RuntimeError(f"7z extraction failed: {result.stderr}")
+        raise RuntimeError(f"{tool} extraction failed: {result.stderr or result.stdout}")
 
 
 def find_mod_folders(extracted_root):
@@ -112,15 +123,33 @@ def find_mod_folders(extracted_root):
     return unique
 
 
+def is_active(folder_name):
+    load_order_file = MODS_DIR / "mod_load_order.txt"
+    if not load_order_file.exists():
+        return False
+    for line in load_order_file.read_text().splitlines():
+        if line.strip() == folder_name:
+            return True
+    return False
+
+
 def install_mod_folder(src_folder):
     dest = MODS_DIR / src_folder.name
-    if dest.exists():
+    was_installed = dest.exists()
+    if was_installed:
         backup = MODS_DIR / f"{src_folder.name}.bak-{int(time.time())}"
         log(f"backing up existing '{dest.name}' -> '{backup.name}'")
         dest.rename(backup)
     shutil.move(str(src_folder), str(dest))
     log(f"installed '{src_folder.name}' -> {dest}")
-    return dest
+    # A folder that already existed before this install was, by definition,
+    # already tracked (active or not) in mod_load_order.txt - untouched by
+    # this replace-in-place. A brand new folder has no entry there at all,
+    # meaning it's on disk but the game won't load it until something adds
+    # it - never silently do that here, just make it visible.
+    is_new = not was_installed
+    was_active = is_active(dest.name) if not is_new else False
+    return dest, is_new, was_active
 
 
 def update_mod_ids_entry(mod_id, folder_name, timestamp):
@@ -188,16 +217,31 @@ def main():
                 raise RuntimeError("no *.mod manifest found in the archive - unexpected layout")
 
             installed_names = []
+            newly_inactive = []
             for folder in mod_folders:
-                dest = install_mod_folder(folder)
+                dest, is_new, was_active = install_mod_folder(folder)
                 installed_names.append(dest.name)
+                if is_new:
+                    newly_inactive.append(dest.name)
 
             update_mod_ids_entry(mod_id, installed_names[0], latest_ts or int(time.time()))
 
-        notify(
-            "Darktide Mod Install",
-            f"Installed/updated: {', '.join(installed_names)}",
-        )
+        if newly_inactive:
+            log(
+                f"NOT activated (new install, not in mod_load_order.txt): "
+                f"{', '.join(newly_inactive)}"
+            )
+            notify(
+                "Darktide Mod Install",
+                f"Installed (inactive): {', '.join(installed_names)}\n"
+                f"New mod - run darktide-mod-tui to enable it",
+                "critical",
+            )
+        else:
+            notify(
+                "Darktide Mod Install",
+                f"Updated (still active): {', '.join(installed_names)}",
+            )
         log(f"done: {mod_name} ({', '.join(installed_names)})")
 
     except Exception as e:
