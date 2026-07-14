@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -74,6 +75,16 @@ def parse_query(qs):
 
 def download_file(url, dest_dir):
     dest_dir.mkdir(parents=True, exist_ok=True)
+    # Some CDN URLs come back with raw, unescaped spaces (and possibly
+    # other reserved chars) in the path - e.g. mod filenames like
+    # "A La Mode.zip-663-...". urllib rejects those outright, so
+    # percent-encode just the path, leaving an already-well-formed query
+    # string untouched.
+    parts = urllib.parse.urlsplit(url)
+    safe_path = urllib.parse.quote(parts.path, safe="/%")
+    url = urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, safe_path, parts.query, parts.fragment)
+    )
     req = urllib.request.Request(url, headers={"User-Agent": "darktide-nxm-handler/1.0"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         cd = resp.headers.get("Content-Disposition", "")
