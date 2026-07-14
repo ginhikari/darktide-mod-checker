@@ -49,3 +49,27 @@ If your installed mod list changes, `mod_ids.txt` needs updating. Each line
 is `<installed-folder-name>	<nexus-mod-id>` (tab-separated). The mod ID is
 extracted from Vortex-style download folder names, which follow the
 pattern `<Name>-<ModID>-<version>-<unixTimestamp>`.
+
+## `nxm_handler.py` / `mod_tui.py` (superseded, kept for reference)
+
+Two follow-on experiments toward closing the "known limitation" above
+without needing Premium:
+
+- **`nxm_handler.py`** — registers as the system's `nxm://` protocol
+  handler. Clicking "Mod Manager Download" on a mod's Nexus page (instead
+  of the plain download button) fires an `nxm://` link with a short-lived,
+  single-use API token; this script catches it, resolves the real
+  download URL via the Nexus API, extracts the archive, and installs it
+  straight into the Darktide `mods/` folder — one click per mod instead
+  of manual download-extract-move.
+- **`mod_tui.py`** — a `curses` terminal UI listing every installed mod
+  with active/inactive state (as tracked by `mods/mod_load_order.txt`),
+  letting you toggle mods on/off without hand-editing that file.
+
+Both worked, but ended up superseded by
+[nomm](https://github.com/Allexio/nomm), a proper GUI mod manager that
+covers this same ground (and more — full download automation, no
+per-mod click required) more completely. Left here in case they're useful
+as a lighter-weight reference, or if `nomm` ever stops being maintained.
+Both hardcode this machine's paths (`/home/ginhikari/...`) rather than
+deriving them — adjust before reusing elsewhere.
