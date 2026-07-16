@@ -134,32 +134,37 @@ def find_mod_folders(extracted_root):
     return unique
 
 
-def is_active(folder_name):
-    load_order_file = MODS_DIR / "mod_load_order.txt"
-    if not load_order_file.exists():
-        return False
-    for line in load_order_file.read_text().splitlines():
-        if line.strip() == folder_name:
-            return True
-    return False
+def find_existing(name):
+    """This install runs AML, which patches base/mod_manager.lua to load
+    every mod folder that doesn't start with '_' and ignores
+    mod_load_order.txt entirely. So "already installed" means a folder
+    at either MODS_DIR/name (active) or MODS_DIR/_name (disabled) -
+    check both and report which. Returns (path_or_None, is_active).
+    """
+    active = MODS_DIR / name
+    if active.exists():
+        return active, True
+    inactive = MODS_DIR / f"_{name}"
+    if inactive.exists():
+        return inactive, False
+    return None, False
 
 
 def install_mod_folder(src_folder):
-    dest = MODS_DIR / src_folder.name
-    was_installed = dest.exists()
-    if was_installed:
-        backup = MODS_DIR / f"{src_folder.name}.bak-{int(time.time())}"
+    existing, was_active = find_existing(src_folder.name)
+    is_new = existing is None
+    # Preserve whatever active/inactive state the existing install was in -
+    # an update must never silently re-enable something you disabled.
+    # A brand new mod is installed disabled by default: never silently
+    # activate something you haven't chosen to load yet.
+    dest = existing if existing is not None else MODS_DIR / f"_{src_folder.name}"
+
+    if existing is not None:
+        backup = MODS_DIR / f"{dest.name}.bak-{int(time.time())}"
         log(f"backing up existing '{dest.name}' -> '{backup.name}'")
         dest.rename(backup)
     shutil.move(str(src_folder), str(dest))
     log(f"installed '{src_folder.name}' -> {dest}")
-    # A folder that already existed before this install was, by definition,
-    # already tracked (active or not) in mod_load_order.txt - untouched by
-    # this replace-in-place. A brand new folder has no entry there at all,
-    # meaning it's on disk but the game won't load it until something adds
-    # it - never silently do that here, just make it visible.
-    is_new = not was_installed
-    was_active = is_active(dest.name) if not is_new else False
     return dest, is_new, was_active
 
 
@@ -228,24 +233,21 @@ def main():
                 raise RuntimeError("no *.mod manifest found in the archive - unexpected layout")
 
             installed_names = []
-            newly_inactive = []
+            inactive_names = []
             for folder in mod_folders:
                 dest, is_new, was_active = install_mod_folder(folder)
                 installed_names.append(dest.name)
-                if is_new:
-                    newly_inactive.append(dest.name)
+                if is_new or not was_active:
+                    inactive_names.append(dest.name)
 
             update_mod_ids_entry(mod_id, installed_names[0], latest_ts or int(time.time()))
 
-        if newly_inactive:
-            log(
-                f"NOT activated (new install, not in mod_load_order.txt): "
-                f"{', '.join(newly_inactive)}"
-            )
+        if inactive_names:
+            log(f"still/newly inactive (folder starts with '_'): {', '.join(inactive_names)}")
             notify(
                 "Darktide Mod Install",
                 f"Installed (inactive): {', '.join(installed_names)}\n"
-                f"New mod - run darktide-mod-tui to enable it",
+                f"Run darktide-mod-tui to enable it",
                 "critical",
             )
         else:
