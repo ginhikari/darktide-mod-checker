@@ -35,6 +35,7 @@ NEXUS_API_KEY_FILE = NEXUS_CONFIG_DIR / "api_key"
 NEXUS_MOD_IDS_FILE = NEXUS_CONFIG_DIR / "mod_ids.txt"
 NEXUS_GAME_DOMAIN = "warhammer40kdarktide"
 NEXUS_API_BASE = "https://api.nexusmods.com/v1"
+NEXUS_MOD_URL = "https://www.nexusmods.com/{}/mods/{}"
 TIMESTAMP_RE = re.compile(r"(\d{9,10})(?:\.\d+)?$")
 
 
@@ -120,7 +121,7 @@ def save_state(rows, active_set):
 def fetch_updates(stdscr, rows, w):
     """Fetch update availability for all matchable rows, showing progress
     as it goes. Returns dict: row name -> (installed_ts, latest_ts,
-    latest_version) for rows where an update is available.
+    latest_version, url) for rows where an update is available.
     """
     if not NEXUS_API_KEY_FILE.exists():
         return {}, f"no Nexus API key at {NEXUS_API_KEY_FILE}"
@@ -139,7 +140,8 @@ def fetch_updates(stdscr, rows, w):
             info = fetch_mod_info(modid, api_key)
             latest_ts = info.get("updated_timestamp")
             if installed_ts is not None and latest_ts is not None and latest_ts > installed_ts:
-                outdated[name] = (installed_ts, latest_ts, info.get("version"))
+                url = NEXUS_MOD_URL.format(NEXUS_GAME_DOMAIN, modid)
+                outdated[name] = (installed_ts, latest_ts, info.get("version"), url)
         except Exception:
             errors += 1
         time.sleep(0.3)
@@ -181,6 +183,10 @@ def run(stdscr):
             subtitle += f"  ({len(broken)} broken reference(s) in load order) "
         stdscr.addstr(1, max(0, (w - len(subtitle)) // 2), subtitle, curses.A_DIM)
 
+        if rows and rows[cursor] in updates:
+            _, _, _, url = updates[rows[cursor]]
+            stdscr.addstr(2, 0, f" {url}"[: w - 1].ljust(w - 1), curses.color_pair(3))
+
         if cursor < top:
             top = cursor
         elif cursor >= top + list_h:
@@ -196,7 +202,7 @@ def run(stdscr):
             color = curses.color_pair(1) if is_active else curses.color_pair(2)
             line = f" {mark} {name}"
             if name in updates:
-                _, _, latest_version = updates[name]
+                _, _, latest_version, _ = updates[name]
                 line += f"  (update: {latest_version})" if latest_version else "  (update available)"
             attr = color
             if name in updates:
