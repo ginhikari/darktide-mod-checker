@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-"""Terminal UI for Darktide mods: lists everything installed, shows which
-are active (present in mod_load_order.txt) vs inactive, and lets you
-toggle them on/off. Load order among already-active mods is preserved;
-newly-activated mods are appended to the end of the list.
+"""Terminal UI for Darktide mods: lists everything installed and lets you
+toggle them on/off.
+
+This install runs AML (Automatic Mod Loader), which patches
+mods/base/mod_manager.lua to scan every mod folder directly and compute
+load order itself - it unconditionally ignores mod_load_order.txt. AML's
+own documented way to disable a mod is to prepend an underscore to its
+folder name, so that's what toggling here does: renames "Name" <->
+"_Name" on disk. There is no separate save step - toggling immediately
+renames the folder, since a half-applied rename set has no meaningful
+"undo" the way an edited text file would.
 
 Press 'u' to fetch update availability from Nexus Mods (same source as
 check_updates.py / run_check.sh).
@@ -18,15 +25,6 @@ from pathlib import Path
 MODS_DIR = Path(
     "/home/ginhikari/.var/app/com.valvesoftware.Steam/.local/share/Steam"
     "/steamapps/common/Warhammer 40,000 DARKTIDE/mods"
-)
-LOAD_ORDER_FILE = MODS_DIR / "mod_load_order.txt"
-LOAD_ORDER_HEADER = (
-    "-- ################################################################\n"
-    "-- Enter user mod names below, separated by line.\n"
-    "-- Order in the list determines the order in which mods are loaded.\n"
-    "-- Do not rename a mod's folders.\n"
-    "-- You do not need to include 'base' or 'dmf' mod folders.\n"
-    "-- ################################################################\n"
 )
 ALWAYS_ON = {"base", "dmf"}
 
@@ -65,15 +63,17 @@ def load_nexus_index():
         installed_ts = int(m.group(1)) if m else None
         entries.append((name, int(modid), installed_ts))
 
-    folders = [item.name for item in MODS_DIR.iterdir() if item.is_dir()]
+    display_names = {
+        item.name.lstrip("_") for item in MODS_DIR.iterdir() if item.is_dir()
+    }
     index = {}
-    for folder in folders:
-        norm_folder = _normalize(folder)
+    for display_name in display_names:
+        norm_folder = _normalize(display_name)
         if not norm_folder:
             continue
         for name, modid, installed_ts in entries:
             if _normalize(name).startswith(norm_folder):
-                index[folder] = (modid, installed_ts)
+                index[display_name] = (modid, installed_ts)
                 break
     return index
 
@@ -88,34 +88,45 @@ def fetch_mod_info(mod_id, api_key):
 
 
 def load_state():
-    installed = {}
+    """Scan MODS_DIR the way AML does: a folder is active if it doesn't
+    start with '_' and contains a manifest matching its own (unprefixed)
+    name. Returns (rows, active_set, dir_names) where dir_names maps
+    display name -> actual on-disk folder name (so callers know exactly
+    what to rename).
+    """
+    dir_names = {}
+    active_set = set()
     for item in sorted(MODS_DIR.iterdir()):
-        if item.is_dir() and item.name not in ALWAYS_ON:
-            manifest = item / f"{item.name}.mod"
-            if manifest.exists():
-                installed[item.name] = True
+        if not item.is_dir() or item.name in ALWAYS_ON:
+            continue
+        is_active = not item.name.startswith("_")
+        display_name = item.name if is_active else item.name[1:]
+        manifest = item / f"{display_name}.mod"
+        if not manifest.exists():
+            continue
+        dir_names[display_name] = item.name
+        if is_active:
+            active_set.add(display_name)
 
-    active_order = []
-    broken = []
-    if LOAD_ORDER_FILE.exists():
-        for line in LOAD_ORDER_FILE.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("--"):
-                continue
-            active_order.append(line)
-            if line not in installed:
-                broken.append(line)
-
-    active_set = set(active_order)
-    # active mods first, in existing load order; then inactive-but-installed
-    rows = [name for name in active_order if name in installed]
-    rows += sorted(n for n in installed if n not in active_set)
-    return rows, active_set, broken
+    rows = sorted(dir_names, key=str.lower)
+    return rows, active_set, dir_names
 
 
-def save_state(rows, active_set):
-    lines = [name for name in rows if name in active_set]
-    LOAD_ORDER_FILE.write_text(LOAD_ORDER_HEADER + "\n".join(lines) + "\n")
+def toggle_mod(dir_names, display_name, want_active):
+    """Rename display_name's folder to add/remove the leading underscore.
+    Returns the error message on failure, or None on success.
+    """
+    current_dir_name = dir_names[display_name]
+    is_active = not current_dir_name.startswith("_")
+    if is_active == want_active:
+        return None
+    new_dir_name = display_name if want_active else f"_{display_name}"
+    try:
+        (MODS_DIR / current_dir_name).rename(MODS_DIR / new_dir_name)
+    except OSError as e:
+        return f"{display_name}: {e}"
+    dir_names[display_name] = new_dir_name
+    return None
 
 
 def fetch_updates(stdscr, rows, w):
@@ -163,8 +174,7 @@ def run(stdscr):
     curses.init_pair(2, curses.COLOR_RED, -1)
     curses.init_pair(3, curses.COLOR_YELLOW, -1)
 
-    rows, active_set, broken = load_state()
-    dirty = False
+    rows, active_set, dir_names = load_state()
     cursor = 0
     top = 0
     status = ""
@@ -175,12 +185,10 @@ def run(stdscr):
         h, w = stdscr.getmaxyx()
         list_h = h - 4
 
-        title = " Darktide Mods "
+        title = " Darktide Mods (AML: toggling renames folders) "
         stdscr.addstr(0, max(0, (w - len(title)) // 2), title, curses.A_BOLD)
         active_count = sum(1 for r in rows if r in active_set)
         subtitle = f" {active_count} active / {len(rows)} installed "
-        if broken:
-            subtitle += f"  ({len(broken)} broken reference(s) in load order) "
         stdscr.addstr(1, max(0, (w - len(subtitle)) // 2), subtitle, curses.A_DIM)
 
         if rows and rows[cursor] in updates:
@@ -211,7 +219,7 @@ def run(stdscr):
                 attr |= curses.A_REVERSE
             stdscr.addstr(3 + i, 0, line[: w - 1].ljust(w - 1), attr)
 
-        footer = " ↑/↓ or j/k: move   space/enter: toggle   s: save   u: check updates   q: quit "
+        footer = " ↑/↓ or j/k: move   space/enter: toggle (renames folder now)   u: check updates   q: quit "
         stdscr.addstr(h - 1, 0, footer[: w - 1], curses.A_DIM)
         if status:
             stdscr.addstr(h - 2, 0, status[: w - 1], curses.color_pair(3) | curses.A_BOLD)
@@ -228,34 +236,21 @@ def run(stdscr):
         elif key in (ord(" "), curses.KEY_ENTER, 10, 13):
             if rows:
                 name = rows[cursor]
-                if name in active_set:
-                    active_set.discard(name)
+                want_active = name not in active_set
+                error = toggle_mod(dir_names, name, want_active)
+                if error:
+                    status = f"rename failed: {error}"
                 else:
-                    active_set.add(name)
-                dirty = True
-                status = "unsaved changes - press 's' to write mod_load_order.txt"
-        elif key == ord("s"):
-            save_state(rows, active_set)
-            dirty = False
-            status = f"saved to {LOAD_ORDER_FILE.name}"
+                    if want_active:
+                        active_set.add(name)
+                    else:
+                        active_set.discard(name)
+                    state = "enabled" if want_active else "disabled"
+                    status = f"{name}: {state} ({dir_names[name]})"
         elif key == ord("u"):
             updates, status = fetch_updates(stdscr, rows, w)
         elif key == ord("q"):
-            if dirty:
-                stdscr.addstr(
-                    2, 0,
-                    "unsaved changes - press 'q' again to discard, 's' to save first"[: w - 1],
-                    curses.color_pair(2) | curses.A_BOLD,
-                )
-                stdscr.refresh()
-                confirm = stdscr.getch()
-                if confirm == ord("q"):
-                    break
-                elif confirm == ord("s"):
-                    save_state(rows, active_set)
-                    break
-            else:
-                break
+            break
 
 
 def main():
