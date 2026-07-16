@@ -1,3 +1,4 @@
 api_key
 last_check.log
 *.log
+__pycache__/

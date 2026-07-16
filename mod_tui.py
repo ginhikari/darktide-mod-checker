@@ -3,8 +3,16 @@
 are active (present in mod_load_order.txt) vs inactive, and lets you
 toggle them on/off. Load order among already-active mods is preserved;
 newly-activated mods are appended to the end of the list.
+
+Press 'u' to fetch update availability from Nexus Mods (same source as
+check_updates.py / run_check.sh).
 """
 import curses
+import json
+import re
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 MODS_DIR = Path(
@@ -21,6 +29,61 @@ LOAD_ORDER_HEADER = (
     "-- ################################################################\n"
 )
 ALWAYS_ON = {"base", "dmf"}
+
+NEXUS_CONFIG_DIR = Path.home() / ".config" / "nexus-mod-checker"
+NEXUS_API_KEY_FILE = NEXUS_CONFIG_DIR / "api_key"
+NEXUS_MOD_IDS_FILE = NEXUS_CONFIG_DIR / "mod_ids.txt"
+NEXUS_GAME_DOMAIN = "warhammer40kdarktide"
+NEXUS_API_BASE = "https://api.nexusmods.com/v1"
+TIMESTAMP_RE = re.compile(r"(\d{9,10})(?:\.\d+)?$")
+
+
+def _normalize(name):
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def load_nexus_index():
+    """Map installed mod folder name -> (mod_id, installed_timestamp).
+
+    mod_ids.txt lines look like 'SMOG Cleaner-847-1-1-1777899913\t847'
+    (archive-style name with the mod id and a timestamp baked in). Folder
+    names in MODS_DIR don't match that string exactly, so match by
+    normalized prefix: the folder's normalized name has to be a prefix of
+    the entry's normalized name.
+    """
+    if not NEXUS_MOD_IDS_FILE.exists():
+        return {}
+
+    entries = []
+    for line in NEXUS_MOD_IDS_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line or "\t" not in line:
+            continue
+        name, modid = line.split("\t")
+        m = TIMESTAMP_RE.search(name)
+        installed_ts = int(m.group(1)) if m else None
+        entries.append((name, int(modid), installed_ts))
+
+    folders = [item.name for item in MODS_DIR.iterdir() if item.is_dir()]
+    index = {}
+    for folder in folders:
+        norm_folder = _normalize(folder)
+        if not norm_folder:
+            continue
+        for name, modid, installed_ts in entries:
+            if _normalize(name).startswith(norm_folder):
+                index[folder] = (modid, installed_ts)
+                break
+    return index
+
+
+def fetch_mod_info(mod_id, api_key):
+    url = f"{NEXUS_API_BASE}/games/{NEXUS_GAME_DOMAIN}/mods/{mod_id}.json"
+    req = urllib.request.Request(
+        url, headers={"apikey": api_key, "User-Agent": "darktide-mod-tui/1.0"}
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode())
 
 
 def load_state():
@@ -54,6 +117,42 @@ def save_state(rows, active_set):
     LOAD_ORDER_FILE.write_text(LOAD_ORDER_HEADER + "\n".join(lines) + "\n")
 
 
+def fetch_updates(stdscr, rows, w):
+    """Fetch update availability for all matchable rows, showing progress
+    as it goes. Returns dict: row name -> (installed_ts, latest_ts,
+    latest_version) for rows where an update is available.
+    """
+    if not NEXUS_API_KEY_FILE.exists():
+        return {}, f"no Nexus API key at {NEXUS_API_KEY_FILE}"
+
+    api_key = NEXUS_API_KEY_FILE.read_text().strip()
+    nexus_index = load_nexus_index()
+    matched = [(name, modid, ts) for name, (modid, ts) in nexus_index.items() if name in rows]
+
+    outdated = {}
+    errors = 0
+    for i, (name, modid, installed_ts) in enumerate(matched):
+        msg = f" checking updates... {i + 1}/{len(matched)}: {name}"
+        stdscr.addstr(2, 0, msg[: w - 1].ljust(w - 1), curses.color_pair(3))
+        stdscr.refresh()
+        try:
+            info = fetch_mod_info(modid, api_key)
+            latest_ts = info.get("updated_timestamp")
+            if installed_ts is not None and latest_ts is not None and latest_ts > installed_ts:
+                outdated[name] = (installed_ts, latest_ts, info.get("version"))
+        except Exception:
+            errors += 1
+        time.sleep(0.3)
+
+    unmatched = len(rows) - len(matched)
+    status = f"update check done: {len(outdated)} outdated, {len(matched)} checked"
+    if unmatched:
+        status += f", {unmatched} not in mod_ids.txt"
+    if errors:
+        status += f", {errors} error(s)"
+    return outdated, status
+
+
 def run(stdscr):
     curses.curs_set(0)
     curses.start_color()
@@ -67,6 +166,7 @@ def run(stdscr):
     cursor = 0
     top = 0
     status = ""
+    updates = {}
 
     while True:
         stdscr.erase()
@@ -95,12 +195,17 @@ def run(stdscr):
             mark = "[x]" if is_active else "[ ]"
             color = curses.color_pair(1) if is_active else curses.color_pair(2)
             line = f" {mark} {name}"
+            if name in updates:
+                _, _, latest_version = updates[name]
+                line += f"  (update: {latest_version})" if latest_version else "  (update available)"
             attr = color
+            if name in updates:
+                attr = curses.color_pair(3)
             if idx == cursor:
                 attr |= curses.A_REVERSE
             stdscr.addstr(3 + i, 0, line[: w - 1].ljust(w - 1), attr)
 
-        footer = " ↑/↓ or j/k: move   space/enter: toggle   s: save   q: quit "
+        footer = " ↑/↓ or j/k: move   space/enter: toggle   s: save   u: check updates   q: quit "
         stdscr.addstr(h - 1, 0, footer[: w - 1], curses.A_DIM)
         if status:
             stdscr.addstr(h - 2, 0, status[: w - 1], curses.color_pair(3) | curses.A_BOLD)
@@ -127,6 +232,8 @@ def run(stdscr):
             save_state(rows, active_set)
             dirty = False
             status = f"saved to {LOAD_ORDER_FILE.name}"
+        elif key == ord("u"):
+            updates, status = fetch_updates(stdscr, rows, w)
         elif key == ord("q"):
             if dirty:
                 stdscr.addstr(
