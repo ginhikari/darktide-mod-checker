@@ -219,7 +219,7 @@ def run(stdscr):
                 attr |= curses.A_REVERSE
             stdscr.addstr(3 + i, 0, line[: w - 1].ljust(w - 1), attr)
 
-        footer = " ↑/↓ or j/k: move   space/enter: toggle (renames folder now)   u: check updates   q: quit "
+        footer = " ↑/↓ or j/k: move   space/enter: toggle   r: rescan disk   u: check updates   q: quit "
         stdscr.addstr(h - 1, 0, footer[: w - 1], curses.A_DIM)
         if status:
             stdscr.addstr(h - 2, 0, status[: w - 1], curses.color_pair(3) | curses.A_BOLD)
@@ -249,6 +249,10 @@ def run(stdscr):
                     status = f"{name}: {state} ({dir_names[name]})"
         elif key == ord("u"):
             updates, status = fetch_updates(stdscr, rows, w)
+        elif key == ord("r"):
+            rows, active_set, dir_names = load_state()
+            cursor = min(cursor, max(0, len(rows) - 1))
+            status = f"rescanned: {len(rows)} mods on disk"
         elif key == ord("q"):
             break
 
